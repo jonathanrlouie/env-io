@@ -6,7 +6,7 @@ description = "A highly experimental, work-in-progress, functional effect system
 homepage = "https://github.com/jonathanrlouie/env-io"
 repository = "https://github.com/jonathanrlouie/env-io"
 readme = "README.md"
-keywords = ["functional effect system", "ZIO"]
+keywords = ["functional", "effects", "ZIO"]
 license = "MIT"
 edition = "2018"
 
