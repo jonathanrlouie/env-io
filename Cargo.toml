@@ -1,0 +1,13 @@
+[package]
+name = "env-io"
+version = "0.0.1"
+authors = ["Jonathan Louie <jonathanrlouie@gmail.com>"]
+description = "A highly experimental, work-in-progress, functional effect system for Rust that is inspired by the ZIO library for Scala"
+homepage = "https://github.com/jonathanrlouie/env-io"
+repository = "https://github.com/jonathanrlouie/env-io"
+readme = "README.md"
+keywords = ["functional effect system", "ZIO"]
+license = "MIT"
+edition = "2018"
+
+[dependencies]
