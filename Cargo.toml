@@ -11,3 +11,6 @@ license = "MIT"
 edition = "2018"
 
 [dependencies]
+
+[dev-dependencies]
+mdo = "0.3.0"
