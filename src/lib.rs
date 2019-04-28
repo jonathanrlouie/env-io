@@ -89,25 +89,23 @@ pub fn eff<A, B, F: Fn(&A) -> B>(f: F) -> Effect<A, B, F> {
     f.effect()
 }
 
-/*
 #[macro_export]
 macro_rules! eff {
-    ($t:ty, $e:expr) => {
-        (move |_: &$t| $e).effect()
+    ($e:expr) => {
+        (move |_: &()| $e).effect()
     }
-}*/
+}
 
 #[cfg(test)]
 mod tests {
     use mdo::mdo;
     use super::*;
 
-    /*
     fn bind<Env, OutEnv, F>(envio: Env, f: F) -> FlatMap<Env, F>
         where Env: EnvIO, OutEnv: EnvIO, F: Fn(Env::Out) -> OutEnv,
     {
         envio.flat_map(f)
-    }*/
+    }
 
     trait Console<T> {
         fn println(&self, line: &str) -> T;
@@ -139,18 +137,10 @@ mod tests {
 
     #[test]
     fn test() {
-        //println!("hi");
-        //let e = eff(|a: &i32| println!("hi {}", a.to_string()));
-        //let e = eff!(i32, "hi");
-
-        /*
         let e = mdo! {
-            _ =<< println("Hi world");
-            ret println("yo")
-        };*/
-
-        let e = println("hi".to_string())
-            .flat_map(|_| println("yo".to_string()));
+            _ =<< println("Hi world".to_string());
+            ret println("yo".to_string())
+        };
 
         let console_mod = ConsoleModule {
             console: TestConsole
@@ -158,14 +148,13 @@ mod tests {
         assert_eq!(e.run(&console_mod), "yo");
     }
 
-    /*
     #[test]
     fn test_flatten() {
         let e = mdo! {
             x =<< eff!(eff!("hi")).flatten();
             ret eff!(x)
         };
-        assert_eq!(e.run(), "hi");
+        assert_eq!(e.run(&()), "hi");
     }
 
     #[test]
@@ -176,7 +165,7 @@ mod tests {
                 .map(|i: u32| i as i32);
             ret eff!(x)
         };
-        assert_eq!(e.run(), 4);
-    }*/
+        assert_eq!(e.run(&()), 4);
+    }
 }
 
