@@ -3,11 +3,11 @@ use std::marker::PhantomData;
 
 type BAny = Box<dyn Any>;
 
-type Kleisli = Box<Fn(BAny) -> Box<Instr>>;
+type Kleisli = Box<dyn Fn(BAny) -> Box<Instr>>;
 
 enum Instr {
     Succeed(BAny),
-    Effect(Box<Fn() -> BAny>),
+    Effect(Box<dyn Fn() -> BAny>),
     FlatMap(Box<Instr>, Kleisli),
 }
 
@@ -21,7 +21,7 @@ impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
         let any_input_k = move |bany: BAny| {
             let a: Box<A> = bany
                 .downcast::<A>()
-                .unwrap_or_else(|_| panic!("flat_map: Could not downcast Any to A"));
+                .expect("flat_map: Could not downcast Any to A");
             k(*a)
         };
 
@@ -84,18 +84,18 @@ fn interpret<A: 'static>(mut instr: Instr) -> A {
                 if let Some(kleisli) = stack.pop() {
                     instr = *kleisli(eff());
                 } else {
-                    return *eff().downcast::<A>().unwrap_or_else(|_| {
-                        panic!("interpret (effect): Could not downcast Any to A")
-                    });
+                    return *eff()
+                        .downcast::<A>()
+                        .expect("interpret (effect): Could not downcast Any to A");
                 }
             }
             Instr::Succeed(a) => {
                 if let Some(kleisli) = stack.pop() {
                     instr = *kleisli(a);
                 } else {
-                    return *a.downcast::<A>().unwrap_or_else(|_| {
-                        panic!("interpret (succeed): Could not downcast Any to A")
-                    });
+                    return *a
+                        .downcast::<A>()
+                        .expect("interpret (succeed): Could not downcast Any to A");
                 }
             }
         }
