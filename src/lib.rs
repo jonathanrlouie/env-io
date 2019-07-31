@@ -18,15 +18,11 @@ struct EnvIO<R, A, E> {
 
 impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
     fn flat_map<B, K: Fn(A) -> EnvIO<R, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
-        let boxed_input_k = move |a: Box<A>| {
-            k(*a)
-        };
-
         let any_input_k = move |bany: BAny| {
             let a: Box<A> = bany
                 .downcast::<A>()
                 .unwrap_or_else(|_| panic!("flat_map: Could not downcast Any to A"));
-            boxed_input_k(a)
+            k(*a)
         };
 
         let instr_output_k = move |bany: BAny| {
@@ -43,14 +39,14 @@ impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
 macro_rules! effect {
     ($e:expr) => {
         {
-			$crate::effect(move || Box::new($e))
+			$crate::effect(move || $e)
         }
     }
 }
 
-fn effect<R, A: 'static, E, F: 'static>(eff: F) -> EnvIO<R, A, E> where F: Fn() -> Box<A> {
+fn effect<R, A: 'static, E, F: 'static>(eff: F) -> EnvIO<R, A, E> where F: Fn() -> A {
     let effect_any = move || {
-        let bany: BAny = eff();
+        let bany: BAny = Box::new(eff());
         bany
     };
 
