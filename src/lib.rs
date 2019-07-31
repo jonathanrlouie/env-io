@@ -1,98 +1,112 @@
+use std::any::Any;
 use std::marker::PhantomData;
 
-pub trait EnvIO {
-    type In;
-    type Out;
+type BAny = Box<dyn Any>;
 
-    fn run(self, input: &Self::In) -> Self::Out;
+type Kleisli = Box<Fn(BAny) -> Box<Instr>>;
 
-    fn flat_map<OutEnv, F>(self, f: F) -> FlatMap<Self, F>
-        where Self: Sized, OutEnv: EnvIO, F: Fn(Self::Out) -> OutEnv {
-        FlatMap { envio: self, f }
-    }
-
-    fn map<Out, F>(self, f: F) -> Map<Self, F>
-        where Self: Sized, F: Fn(Self::Out) -> Out {
-        Map { envio: self, f }
-    }
-
-    fn flatten(self) -> FlatMap<Self, fn(Self::Out) -> Self::Out>
-        where Self: Sized {
-        FlatMap { envio: self, f: move |x| x }
-    }
-
+enum Instr {
+    Succeed(BAny),
+    Effect(Box<Fn() -> BAny>),
+    FlatMap(Box<Instr>, Kleisli)
 }
 
-pub struct Effect<In, Out, F: Fn(&In) -> Out> {
-    effect: F,
-    _pd: PhantomData<In>
+struct EnvIO<R, A, E> {
+    instr: Instr,
+    _pd: PhantomData<(R, A, E)>
 }
 
-impl<In, Out0, F: Fn(&In) -> Out0> EnvIO for Effect<In, Out0, F> {
-    type In = In;
-    type Out = Out0;
+impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
+    fn flat_map<B, K: Fn(A) -> EnvIO<R, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
+        let boxed_input_k = move |a: Box<A>| {
+            k(*a)
+        };
 
-    fn run(self, input: &Self::In) -> Self::Out {
-        (self.effect)(input)
-    }
-}
+        let any_input_k = move |bany: BAny| {
+            let a: Box<A> = bany
+                .downcast::<A>()
+                .unwrap_or_else(|_| panic!("flat_map: Could not downcast Any to A"));
+            boxed_input_k(a)
+        };
 
+        let instr_output_k = move |bany: BAny| {
+            Box::new(any_input_k(bany).instr)
+        };
 
-pub struct Map<Env, F> {
-    envio: Env,
-    f: F
-}
-
-impl<Env: EnvIO, Out, F> EnvIO for Map<Env, F> where F: Fn(Env::Out) -> Out {
-    type In = Env::In;
-    type Out = Out;
-
-    fn run(self, input: &Self::In) -> Out {
-        (self.f)(self.envio.run(input))
+        EnvIO {
+            instr: Instr::FlatMap(Box::new(self.instr), Box::new(instr_output_k)),
+            _pd: PhantomData
+        }
     }
 }
 
-
-
-pub struct FlatMap<Env, F> {
-    envio: Env,
-    f: F
-}
-
-impl<Env: EnvIO, OutEnv: EnvIO<In=Env::In>, F> EnvIO for FlatMap<Env, F> where F: Fn(Env::Out) -> OutEnv {
-    type In = Env::In;
-    type Out = OutEnv::Out;
-
-    fn run(self, input: &Self::In) -> OutEnv::Out {
-        (self.f)(self.envio.run(input)).run(input)
-    }
-}
-
-pub trait IntoEnvIO<In> {
-    type Out;
-
-    type IntoEnv: EnvIO<In=In, Out=Self::Out>;
-
-    fn effect(self) -> Self::IntoEnv;
-}
-
-impl<In, T, F: Fn(&In) -> T> IntoEnvIO<In> for F {
-    type Out = T;
-    type IntoEnv = Effect<In, T, F>;
-
-    fn effect(self) -> Self::IntoEnv {
-        Effect { effect: self, _pd: PhantomData }
-    }
-}
-
-pub fn eff<A, B, F: Fn(&A) -> B>(f: F) -> Effect<A, B, F> {
-    f.effect()
-}
-
-#[macro_export]
-macro_rules! eff {
+macro_rules! effect {
     ($e:expr) => {
-        (move |_: &()| $e).effect()
+        {
+			$crate::effect(move || Box::new($e))
+        }
+    }
+}
+
+fn effect<R, A: 'static, E, F: 'static>(eff: F) -> EnvIO<R, A, E> where F: Fn() -> Box<A> {
+    let effect_any = move || {
+        let bany: BAny = eff();
+        bany
+    };
+
+    EnvIO {
+        instr: Instr::Effect(Box::new(effect_any)),
+        _pd: PhantomData
+    }
+}
+
+fn success<R, A: 'static, E>(a: A) -> EnvIO<R, A, E> {
+    EnvIO {
+        instr: Instr::Succeed(Box::new(a)),
+        _pd: PhantomData
+    }
+}
+
+fn run<R, A: 'static, E>(envio: EnvIO<R, A, E>) -> A {
+    interpret::<A>(envio.instr)
+}
+
+fn interpret<A: 'static>(mut instr: Instr) -> A {
+    let mut stack: Vec<Kleisli> = vec![];
+    loop {
+        match instr {
+            Instr::FlatMap(inner, kleisli) => {
+                match *inner {
+                    Instr::Effect(eff) => {
+                        instr = *kleisli(eff())
+                    }
+                    Instr::Succeed(a) => {
+                        instr = *kleisli(a);
+                    }
+                    _ => {
+                        stack.push(kleisli);
+                        instr = *inner;
+                    }
+                }
+            }
+            Instr::Effect(eff) => {
+                if let Some(kleisli) = stack.pop() {
+                    instr = *kleisli(eff());
+                } else {
+                    return *eff()
+                        .downcast::<A>()
+                        .unwrap_or_else(|_| panic!("interpret (effect): Could not downcast Any to A"));
+                }
+            }
+            Instr::Succeed(a) => {
+                if let Some(kleisli) = stack.pop() {
+                    instr = *kleisli(a);
+                } else {
+                    return *a.downcast::<A>()
+                        .unwrap_or_else(|_| panic!("interpret (succeed): Could not downcast Any to A"));
+                }
+            }
+        }
     }
 }
 
@@ -101,71 +115,14 @@ mod tests {
     use mdo::mdo;
     use super::*;
 
-    fn bind<Env, OutEnv, F>(envio: Env, f: F) -> FlatMap<Env, F>
-        where Env: EnvIO, OutEnv: EnvIO, F: Fn(Env::Out) -> OutEnv,
-    {
-        envio.flat_map(f)
-    }
-
-    trait Console<T> {
-        fn println(&self, line: &str) -> T;
-    }
-
-    struct ProductionConsole;
-
-    struct ConsoleModule<T> {
-        console: T
-    }
-
-    impl Console<()> for ProductionConsole {
-        fn println(&self, line: &str) {
-            println!("{}", line)
-        }
-    }
-
-    struct TestConsole;
-
-    impl Console<String> for TestConsole {
-        fn println(&self, line: &str) -> String {
-            line.to_string()
-        }
-    }
-
-    fn println<A, T: Console<A>>(line: String) -> impl EnvIO<In=ConsoleModule<T>, Out=A> {
-        eff(move |console_mod: &ConsoleModule<T>| console_mod.console.println(&line))
-    }
-
     #[test]
     fn test() {
-        let e = mdo! {
-            _ =<< println("Hi world".to_string());
-            ret println("yo".to_string())
-        };
+        let i1: EnvIO<(), u32, ()> = success(3u32);
+        let i2 = i1
+            .flat_map(move |a| success(5u32)
+                .flat_map(move |b| effect!(println!("{}", a + b))));
 
-        let console_mod = ConsoleModule {
-            console: TestConsole
-        };
-        assert_eq!(e.run(&console_mod), "yo");
-    }
-
-    #[test]
-    fn test_flatten() {
-        let e = mdo! {
-            x =<< eff!(eff!("hi")).flatten();
-            ret eff!(x)
-        };
-        assert_eq!(e.run(&()), "hi");
-    }
-
-    #[test]
-    fn test_map() {
-        let e = mdo! {
-            x =<< eff!(2u32)
-                .map(|i: u32| 2 * i)
-                .map(|i: u32| i as i32);
-            ret eff!(x)
-        };
-        assert_eq!(e.run(&()), 4);
+        assert_eq!(run::<(), (), ()>(i2), ());
     }
 }
 
