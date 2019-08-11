@@ -3,6 +3,10 @@ use std::marker::PhantomData;
 
 type BAny = Box<dyn Any>;
 
+fn downcast<T: 'static>(bany: BAny) -> T {
+    *bany.downcast::<T>().unwrap()
+}
+
 type Kleisli = Box<dyn Fn(BAny) -> Box<Instr>>;
 
 enum KleisliOrFold {
@@ -30,6 +34,8 @@ enum Instr {
     Effect(Box<dyn Fn() -> BAny>),
     FlatMap(Box<Instr>, KleisliOrFold),
     Fold(Box<Instr>, KleisliOrFold),
+    Read(KleisliOrFold),
+    Provide(BAny, Box<Instr>)
 }
 
 struct EnvIO<R, A, E> {
@@ -39,38 +45,24 @@ struct EnvIO<R, A, E> {
 
 impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
     fn flat_map<B, K: Fn(A) -> EnvIO<R, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
-        let any_input_k = move |bany: BAny| {
-            let a: Box<A> = bany
-                .downcast::<A>()
-                .expect("flat_map: Could not downcast Any to A");
-            k(*a)
-        };
-
-        let instr_output_k = move |bany: BAny| Box::new(any_input_k(bany).instr);
-
         EnvIO {
             instr: Instr::FlatMap(
-                Box::new(self.instr),
-                KleisliOrFold::Kleisli(Box::new(instr_output_k)),
+                box_instr(self),
+                KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
+                    box_instr(k(downcast::<A>(bany)))
+                })),
             ),
             _pd: PhantomData,
         }
     }
 
     fn map<B: 'static, F: Fn(A) -> B + 'static>(self, f: F) -> EnvIO<R, B, E> {
-        let any_input_f = move |bany: BAny| {
-            let a: Box<A> = bany
-                .downcast::<A>()
-                .expect("flat_map: Could not downcast Any to A");
-            f(*a)
-        };
-
-        let instr_output_f = move |bany: BAny| Box::new(succeed(any_input_f(bany)).instr);
-
         EnvIO {
             instr: Instr::FlatMap(
-                Box::new(self.instr),
-                KleisliOrFold::Kleisli(Box::new(instr_output_f)),
+                box_instr(self),
+                KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
+                    box_instr(succeed(f(downcast::<A>(bany))))
+                })),
             ),
             _pd: PhantomData,
         }
@@ -85,37 +77,32 @@ impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
         S: Fn(A) -> B,
         F: Fn(E) -> B,
     {
-        let any_input_success = move |bany: BAny| {
-            let a: Box<A> = bany
-                .downcast::<A>()
-                .expect("fold: Could not downcast Any to A");
-            success(*a)
-        };
-
-        let envio_output_success =
-            move |bany: BAny| Box::new(succeed(any_input_success(bany)).instr);
-
-        let any_input_failure = move |bany: BAny| {
-            let e: Box<E> = bany
-                .downcast::<E>()
-                .expect("fold: Could not downcast Any to A");
-            failure(*e)
-        };
-
-        let envio_output_failure =
-            move |bany: BAny| Box::new(succeed(any_input_failure(bany)).instr);
-
         EnvIO {
             instr: Instr::Fold(
-                Box::new(self.instr),
+                box_instr(self),
                 KleisliOrFold::Fold(
-                    Box::new(envio_output_success),
-                    Box::new(envio_output_failure),
+                    Box::new(move |bany: BAny| box_instr(succeed(success(downcast::<A>(bany))))),
+                    Box::new(move |bany: BAny| box_instr(succeed(failure(downcast::<E>(bany))))),
                 ),
             ),
             _pd: PhantomData,
         }
     }
+
+    fn provide(self, r: R) -> IO<A, E> {
+        provide(r)(self)
+    }
+}
+
+fn provide<R: 'static, A: 'static, E: 'static>(r: R) -> impl FnOnce(EnvIO<R, A, E>) -> IO<A, E> {
+    move |envio: EnvIO<R, A, E>| { EnvIO {
+        instr: Instr::Provide(Box::new(r), box_instr(envio)),
+        _pd: PhantomData
+    }}
+}
+
+fn box_instr<R, E, A>(envio: EnvIO<R, E, A>) -> Box<Instr> {
+    Box::new(envio.instr)
 }
 
 impl<A: 'static> UIO<A> {
@@ -136,6 +123,15 @@ impl<A: 'static, E: 'static> IO<A, E> {
     }
 }
 
+fn environment<R: 'static>() -> EnvIO<R, R, Nothing> {
+    EnvIO {
+        instr: Instr::Read(KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
+            box_instr(succeed(downcast::<R>(bany)))
+        }))),
+        _pd: PhantomData,
+    }
+}
+
 macro_rules! effect {
     ($e:expr) => {{
         $crate::effect(move || $e)
@@ -146,6 +142,7 @@ fn effect<A: 'static, F: 'static>(eff: F) -> UIO<A>
 where
     F: Fn() -> A,
 {
+    // Cannot inline, since the compiler is not able to automatically infer the output type as Box<dyn Any>
     let effect_any = move || {
         let bany: BAny = Box::new(eff());
         bany
@@ -177,6 +174,8 @@ fn run<R, A: 'static, E: 'static>(envio: EnvIO<R, A, E>) -> Result<A, E> {
 
 fn interpret<A: 'static, E: 'static>(mut instr: Instr) -> Result<A, E> {
     let mut stack: Vec<KleisliOrFold> = vec![];
+    let mut environment: Vec<BAny> = vec![];
+
     loop {
         match instr {
             Instr::FlatMap(inner, kleisli) => match *inner {
@@ -193,18 +192,14 @@ fn interpret<A: 'static, E: 'static>(mut instr: Instr) -> Result<A, E> {
                 if let Some(kleisli) = stack.pop() {
                     instr = *kleisli.k()(eff());
                 } else {
-                    return Ok(*eff()
-                        .downcast::<A>()
-                        .expect("interpret (effect): Could not downcast Any to A"));
+                    return Ok(downcast::<A>(eff()));
                 }
             }
             Instr::Succeed(a) => {
                 if let Some(kleisli) = stack.pop() {
                     instr = *kleisli.k()(a);
                 } else {
-                    return Ok(*a
-                        .downcast::<A>()
-                        .expect("interpret (succeed): Could not downcast Any to A"));
+                    return Ok(downcast::<A>(a));
                 }
             }
             Instr::Fold(inner, kleisli) => {
@@ -216,10 +211,19 @@ fn interpret<A: 'static, E: 'static>(mut instr: Instr) -> Result<A, E> {
                 if let Some(kleisli) = stack.pop() {
                     instr = *kleisli.k()(e);
                 } else {
-                    return Err(*e
-                        .downcast::<E>()
-                        .expect("interpret (fail): Could not downcast Any to E"));
+                    return Err(downcast::<E>(e));
                 }
+            }
+            Instr::Read(kleisli) => {
+                if let Some(env) = environment.pop() {
+                    instr = *kleisli.k()(env);
+                } else {
+                    panic!("No environments on the stack");
+                }
+            },
+            Instr::Provide(r, next) => {
+                environment.push(r);
+                instr = *next;
             }
         }
     }
@@ -291,8 +295,21 @@ mod tests {
         let i2 = i1.map(|u: u32| u > 2);
         let result = match run(i2) {
             Ok(b) => b,
-            Err(_) => unimplemented!()
+            Err(_) => unimplemented!(),
         };
         assert_eq!(result, true);
+    }
+
+    #[test]
+    fn test_environment() {
+        let envio: EnvIO<u32, u32, Nothing> = environment::<u32>()
+            .flat_map(move |u| environment::<u32>()
+                .map(move |env| u * env));
+        let next = envio.provide(4);
+        let result = match run(next) {
+            Ok(int) => int,
+            Err(_) => unimplemented!()
+        };
+        assert_eq!(result, 16)
     }
 }
