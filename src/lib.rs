@@ -97,10 +97,6 @@ impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
     }
 }
 
-fn box_instr<R, E, A>(envio: EnvIO<R, E, A>) -> Box<Instr> {
-    Box::new(envio.instr)
-}
-
 impl<A: 'static> UIO<A> {
     fn into_envio<R: 'static, E: 'static>(self) -> EnvIO<R, A, E> {
         EnvIO {
@@ -132,6 +128,10 @@ impl<A: 'static, E: 'static> IO<A, E> {
             _pd: PhantomData,
         }
     }
+}
+
+fn box_instr<R, E, A>(envio: EnvIO<R, E, A>) -> Box<Instr> {
+    Box::new(envio.instr)
 }
 
 fn provide<R: 'static, A: 'static, E: 'static>(r: R) -> impl FnOnce(EnvIO<R, A, E>) -> IO<A, E> {
