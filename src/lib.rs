@@ -23,9 +23,6 @@ impl KleisliOrFold {
     }
 }
 
-type UIO<A> = EnvIO<NoReq, A, Nothing>;
-type IO<A, E> = EnvIO<NoReq, A, E>;
-
 // This type needs to be private so users cannot call environment::<NoReq>()
 enum NoReq {}
 enum Nothing {}
@@ -39,6 +36,10 @@ enum Instr {
     Read(KleisliOrFold),
     Provide(BAny, Box<Instr>)
 }
+
+type UIO<A> = EnvIO<NoReq, A, Nothing>;
+type URIO<R, A> = EnvIO<R, A, Nothing>;
+type IO<A, E> = EnvIO<NoReq, A, E>;
 
 struct EnvIO<R, A, E> {
     instr: Instr,
@@ -96,12 +97,6 @@ impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
     }
 }
 
-fn provide<R: 'static, A: 'static, E: 'static>(r: R) -> impl FnOnce(EnvIO<R, A, E>) -> IO<A, E> {
-    move |envio: EnvIO<R, A, E>| { EnvIO {
-        instr: Instr::Provide(Box::new(r), box_instr(envio)),
-        _pd: PhantomData
-    }}
-}
 
 fn box_instr<R, E, A>(envio: EnvIO<R, E, A>) -> Box<Instr> {
     Box::new(envio.instr)
@@ -135,6 +130,13 @@ impl<A: 'static, E: 'static> IO<A, E> {
             _pd: PhantomData,
         }
     }
+}
+
+fn provide<R: 'static, A: 'static, E: 'static>(r: R) -> impl FnOnce(EnvIO<R, A, E>) -> IO<A, E> {
+    move |envio: EnvIO<R, A, E>| { EnvIO {
+        instr: Instr::Provide(Box::new(r), box_instr(envio)),
+        _pd: PhantomData
+    }}
 }
 
 fn environment<R: 'static>() -> EnvIO<R, R, Nothing> {
@@ -188,7 +190,7 @@ fn run<A: 'static, E: 'static>(envio: EnvIO<NoReq, A, E>) -> Result<A, E> {
 
 fn interpret<A: 'static, E: 'static>(mut instr: Instr) -> Result<A, E> {
     let mut stack: Vec<KleisliOrFold> = vec![];
-    let mut environment: Vec<BAny> = vec![];
+    let mut environment: Option<BAny> = None;
 
     loop {
         match instr {
@@ -229,14 +231,14 @@ fn interpret<A: 'static, E: 'static>(mut instr: Instr) -> Result<A, E> {
                 }
             }
             Instr::Read(kleisli) => {
-                if let Some(env) = environment.pop() {
+                if let Some(env) = environment.take() {
                     instr = *kleisli.k()(env);
                 } else {
                     panic!("No environments on the stack");
                 }
             },
             Instr::Provide(r, next) => {
-                environment.push(r);
+                environment = Some(r);
                 instr = *next;
             }
         }
