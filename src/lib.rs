@@ -23,9 +23,11 @@ impl KleisliOrFold {
     }
 }
 
-type UIO<A> = EnvIO<BAny, A, Nothing>;
-type IO<A, E> = EnvIO<BAny, A, E>;
+// This type needs to be private so users cannot call environment::<NoReq>()
+type UIO<A> = EnvIO<NoReq, A, Nothing>;
+type IO<A, E> = EnvIO<NoReq, A, E>;
 
+enum NoReq {}
 enum Nothing {}
 
 enum Instr {
@@ -44,7 +46,7 @@ struct EnvIO<R, A, E> {
 }
 
 impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
-    fn flat_map<B, K: Fn(A) -> EnvIO<R, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
+    fn flat_map<B, K: Fn(A) -> EnvIO<NoReq, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
         EnvIO {
             instr: Instr::FlatMap(
                 box_instr(self),
@@ -121,6 +123,18 @@ impl<A: 'static, E: 'static> IO<A, E> {
             _pd: PhantomData,
         }
     }
+
+    fn flat_map_req<R: 'static, B, K: Fn(A) -> EnvIO<R, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
+        EnvIO {
+            instr: Instr::FlatMap(
+                box_instr(self),
+                KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
+                    box_instr(k(downcast::<A>(bany)))
+                })),
+            ),
+            _pd: PhantomData,
+        }
+    }
 }
 
 fn environment<R: 'static>() -> EnvIO<R, R, Nothing> {
@@ -168,7 +182,7 @@ fn fail<E: 'static>(e: E) -> IO<Nothing, E> {
     }
 }
 
-fn run<R, A: 'static, E: 'static>(envio: EnvIO<R, A, E>) -> Result<A, E> {
+fn run<A: 'static, E: 'static>(envio: EnvIO<NoReq, A, E>) -> Result<A, E> {
     interpret::<A, E>(envio.instr)
 }
 
@@ -261,8 +275,8 @@ mod tests {
 
     #[test]
     fn test_fail() {
-        let i1: EnvIO<BAny, u32, u32> = succeed(3u32).into_envio();
-        let i2: EnvIO<BAny, (), u32> = i1.flat_map(move |a| {
+        let i1: IO<u32, u32> = succeed(3u32).into_envio();
+        let i2: IO<(), u32> = i1.flat_map(move |a| {
             fail(5u32).flat_map(move |b| effect!(println!("test")).into_envio())
         });
 
@@ -275,8 +289,8 @@ mod tests {
 
     #[test]
     fn test_fold() {
-        let i1: EnvIO<BAny, u32, u32> = succeed(3u32).into_envio();
-        let i2: EnvIO<BAny, (), u32> = i1.flat_map(move |a| {
+        let i1: IO<u32, u32> = succeed(3u32).into_envio();
+        let i2: IO<(), u32> = i1.flat_map(move |a| {
             fail(5u32).flat_map(move |b| effect!(println!("test")).into_envio())
         });
 
@@ -303,13 +317,25 @@ mod tests {
     #[test]
     fn test_environment() {
         let envio: EnvIO<u32, u32, Nothing> = environment::<u32>()
-            .flat_map(move |u| environment::<u32>()
-                .map(move |env| u * env));
+            .map(move |env| env * env);
         let next = envio.provide(4);
         let result = match run(next) {
             Ok(int) => int,
             Err(_) => unimplemented!()
         };
         assert_eq!(result, 16)
+    }
+
+    #[test]
+    fn test_environment_add_req() {
+        let uio: UIO<u32> = succeed(2u32);
+        let envio = uio.flat_map_req(move |value| environment::<u32>()
+            .flat_map(move |env| succeed(env * value)));
+
+        let result = match run(envio.provide(4)) {
+            Ok(int) => int,
+            Err(_) => unimplemented!()
+        };
+        assert_eq!(result, 8)
     }
 }
