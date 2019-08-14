@@ -23,10 +23,10 @@ impl KleisliOrFold {
     }
 }
 
-// This type needs to be private so users cannot call environment::<NoReq>()
 type UIO<A> = EnvIO<NoReq, A, Nothing>;
 type IO<A, E> = EnvIO<NoReq, A, E>;
 
+// This type needs to be private so users cannot call environment::<NoReq>()
 enum NoReq {}
 enum Nothing {}
 
