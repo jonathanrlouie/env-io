@@ -41,16 +41,20 @@ pub type URIO<R, A> = EnvIO<R, A, Nothing>;
 pub type IO<A, E> = EnvIO<NoReq, A, E>;
 
 pub struct ReqEnvIO<R, A, E> {
-    envio: EnvIO<R, A, E>
+    envio: EnvIO<R, A, E>,
 }
 
 impl<R: 'static, A: 'static, E: 'static> ReqEnvIO<R, A, E> {
     pub fn flat_map<B, K: Fn(A) -> EnvIO<NoReq, B, E> + 'static>(self, k: K) -> ReqEnvIO<R, B, E> {
-        ReqEnvIO { envio: self.envio.flat_map(k) }
+        ReqEnvIO {
+            envio: self.envio.flat_map(k),
+        }
     }
 
     pub fn map<B: 'static, F: Fn(A) -> B + 'static>(self, f: F) -> ReqEnvIO<R, B, E> {
-        ReqEnvIO { envio: self.envio.map(f) }
+        ReqEnvIO {
+            envio: self.envio.map(f),
+        }
     }
 
     pub fn fold<S: 'static, F: 'static, B: 'static>(
@@ -58,11 +62,13 @@ impl<R: 'static, A: 'static, E: 'static> ReqEnvIO<R, A, E> {
         success: S,
         failure: F,
     ) -> ReqEnvIO<R, B, Nothing>
-        where
-            S: Fn(A) -> B,
-            F: Fn(E) -> B,
+    where
+        S: Fn(A) -> B,
+        F: Fn(E) -> B,
     {
-        ReqEnvIO { envio: self.envio.fold(success, failure) }
+        ReqEnvIO {
+            envio: self.envio.fold(success, failure),
+        }
     }
 
     pub fn provide(self, r: R) -> IO<A, E> {
@@ -152,7 +158,7 @@ impl<A: 'static, E: 'static> IO<A, E> {
                     })),
                 ),
                 _pd: PhantomData,
-            }
+            },
         }
     }
 }
@@ -175,7 +181,7 @@ pub fn environment<R: 'static>() -> ReqEnvIO<R, R, Nothing> {
                 box_instr(succeed(downcast::<R>(bany)))
             }))),
             _pd: PhantomData,
-        }
+        },
     }
 }
 
