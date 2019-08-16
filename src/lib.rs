@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 type BAny = Box<dyn Any>;
 
 fn downcast<T: 'static>(bany: BAny) -> T {
+    // unwrap here because any failure to downcast means there is a bug in this library
     *bany.downcast::<T>().unwrap()
 }
 
@@ -30,7 +31,7 @@ enum Instr {
     Succeed(BAny),
     Fail(BAny),
     Effect(Box<dyn Fn() -> BAny>),
-    FlatMap(Box<Instr>, KleisliOrFold),
+    AndThen(Box<Instr>, KleisliOrFold),
     Fold(Box<Instr>, KleisliOrFold),
     Read(KleisliOrFold),
     Provide(BAny, Box<Instr>),
@@ -40,19 +41,19 @@ pub type UIO<A> = EnvIO<NoReq, A, Nothing>;
 pub type URIO<R, A> = EnvIO<R, A, Nothing>;
 pub type IO<A, E> = EnvIO<NoReq, A, E>;
 
-pub struct ReqEnvIO<R, A, E> {
+pub struct REnvIO<R, A, E> {
     envio: EnvIO<R, A, E>,
 }
 
-impl<R: 'static, A: 'static, E: 'static> ReqEnvIO<R, A, E> {
-    pub fn flat_map<B, K: Fn(A) -> EnvIO<NoReq, B, E> + 'static>(self, k: K) -> ReqEnvIO<R, B, E> {
-        ReqEnvIO {
-            envio: self.envio.flat_map(k),
+impl<R: 'static, A: 'static, E: 'static> REnvIO<R, A, E> {
+    pub fn and_then<B, K: Fn(A) -> EnvIO<NoReq, B, E> + 'static>(self, k: K) -> REnvIO<R, B, E> {
+        REnvIO {
+            envio: self.envio.and_then(k),
         }
     }
 
-    pub fn map<B: 'static, F: Fn(A) -> B + 'static>(self, f: F) -> ReqEnvIO<R, B, E> {
-        ReqEnvIO {
+    pub fn map<B: 'static, F: Fn(A) -> B + 'static>(self, f: F) -> REnvIO<R, B, E> {
+        REnvIO {
             envio: self.envio.map(f),
         }
     }
@@ -61,12 +62,12 @@ impl<R: 'static, A: 'static, E: 'static> ReqEnvIO<R, A, E> {
         self,
         success: S,
         failure: F,
-    ) -> ReqEnvIO<R, B, Nothing>
+    ) -> REnvIO<R, B, Nothing>
     where
         S: Fn(A) -> B,
         F: Fn(E) -> B,
     {
-        ReqEnvIO {
+        REnvIO {
             envio: self.envio.fold(success, failure),
         }
     }
@@ -82,9 +83,9 @@ pub struct EnvIO<R, A, E> {
 }
 
 impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
-    pub fn flat_map<B, K: Fn(A) -> EnvIO<NoReq, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
+    pub fn and_then<B, K: Fn(A) -> EnvIO<NoReq, B, E> + 'static>(self, k: K) -> EnvIO<R, B, E> {
         EnvIO {
-            instr: Instr::FlatMap(
+            instr: Instr::AndThen(
                 box_instr(self),
                 KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
                     box_instr(k(downcast::<A>(bany)))
@@ -96,7 +97,7 @@ impl<R: 'static, A: 'static, E: 'static> EnvIO<R, A, E> {
 
     pub fn map<B: 'static, F: Fn(A) -> B + 'static>(self, f: F) -> EnvIO<R, B, E> {
         EnvIO {
-            instr: Instr::FlatMap(
+            instr: Instr::AndThen(
                 box_instr(self),
                 KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
                     box_instr(succeed(f(downcast::<A>(bany))))
@@ -145,13 +146,13 @@ impl<A: 'static, E: 'static> IO<A, E> {
         }
     }
 
-    pub fn flat_map_req<R: 'static, B, K: Fn(A) -> ReqEnvIO<R, B, E> + 'static>(
+    pub fn and_then_req<R: 'static, B, K: Fn(A) -> REnvIO<R, B, E> + 'static>(
         self,
         k: K,
-    ) -> ReqEnvIO<R, B, E> {
-        ReqEnvIO {
+    ) -> REnvIO<R, B, E> {
+        REnvIO {
             envio: EnvIO {
-                instr: Instr::FlatMap(
+                instr: Instr::AndThen(
                     box_instr(self),
                     KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
                         box_instr(k(downcast::<A>(bany)).envio)
@@ -174,8 +175,8 @@ fn provide<R: 'static, A: 'static, E: 'static>(r: R) -> impl FnOnce(EnvIO<R, A, 
     }
 }
 
-pub fn environment<R: 'static>() -> ReqEnvIO<R, R, Nothing> {
-    ReqEnvIO {
+pub fn environment<R: 'static>() -> REnvIO<R, R, Nothing> {
+    REnvIO {
         envio: EnvIO {
             instr: Instr::Read(KleisliOrFold::Kleisli(Box::new(move |bany: BAny| {
                 box_instr(succeed(downcast::<R>(bany)))
@@ -236,7 +237,7 @@ fn interpret<A: 'static, E: 'static>(mut instr: Instr) -> Result<A, E> {
 
     loop {
         match instr {
-            Instr::FlatMap(inner, kleisli) => match *inner {
+            Instr::AndThen(inner, kleisli) => match *inner {
                 Instr::Effect(eff) => instr = *kleisli.k()(eff()),
                 Instr::Succeed(a) => {
                     instr = *kleisli.k()(a);
@@ -308,7 +309,7 @@ mod tests {
     fn test() {
         let i1 = succeed(3u32);
         let i2 =
-            i1.flat_map(move |a| succeed(5u32).flat_map(move |b| effect!(println!("{}", a + b))));
+            i1.and_then(move |a| succeed(5u32).and_then(move |b| effect!(println!("{}", a + b))));
 
         let result: () = match run_result(i2) {
             Ok(a) => a,
@@ -320,8 +321,8 @@ mod tests {
     #[test]
     fn test_fail() {
         let i1: IO<u32, u32> = succeed(3u32).into_envio();
-        let i2: IO<(), u32> = i1.flat_map(move |a| {
-            fail(5u32).flat_map(move |b| effect!(println!("test")).into_envio())
+        let i2: IO<(), u32> = i1.and_then(move |a| {
+            fail(5u32).and_then(move |b| effect!(println!("test")).into_envio())
         });
 
         let result: u32 = match run_result(i2) {
@@ -334,8 +335,8 @@ mod tests {
     #[test]
     fn test_fold() {
         let i1: IO<u32, u32> = succeed(3u32).into_envio();
-        let i2: IO<(), u32> = i1.flat_map(move |a| {
-            fail(5u32).flat_map(move |b| effect!(println!("test")).into_envio())
+        let i2: IO<(), u32> = i1.and_then(move |a| {
+            fail(5u32).and_then(move |b| effect!(println!("test")).into_envio())
         });
 
         let i3 = i2.fold(|u| "success".to_string(), |u32| "fail".to_string());
@@ -360,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_environment() {
-        let envio: ReqEnvIO<u32, u32, Nothing> = environment::<u32>().map(move |env| env * env);
+        let envio: REnvIO<u32, u32, Nothing> = environment::<u32>().map(move |env| env * env);
         let next = envio.provide(4);
         let result = match run_result(next) {
             Ok(int) => int,
@@ -372,8 +373,8 @@ mod tests {
     #[test]
     fn test_environment_add_req() {
         let uio: UIO<u32> = succeed(2u32);
-        let envio = uio.flat_map_req(move |value| {
-            environment::<u32>().flat_map(move |env| succeed(env * value))
+        let envio = uio.and_then_req(move |value| {
+            environment::<u32>().and_then(move |env| succeed(env * value))
         });
 
         let result = match run_result(envio.provide(4)) {
